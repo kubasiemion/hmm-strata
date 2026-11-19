@@ -5,3 +5,4 @@ notebooks/precompute.log
 .ipynb_checkpoints/
 NOTES.md
 NOTES-design.md
+notebooks/add_ablation.log

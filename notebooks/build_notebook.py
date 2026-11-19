@@ -1,4 +1,7 @@
-"""Build notebooks/hmm_strata_baseline.ipynb from the package sources and notebooks/results.json."""
+"""Build notebooks/hmm_strata_baseline.ipynb from notebooks/results.json.
+
+The notebook clones the repository (pinned to a tag) instead of embedding the package, so the code lives
+in one place. Execution and output storage are done separately (see the repository README)."""
 import json
 from pathlib import Path
 import nbformat as nbf
@@ -6,24 +9,17 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 R = json.loads((ROOT / "notebooks/results.json").read_text())
-
-MODULES = ["hmmstrata/__init__.py", "hmmstrata/device.py", "hmmstrata/exact.py", "hmmstrata/model.py", "hmmstrata/train.py",
-           "hmmstrata/analyze.py", "hmmstrata/inherit.py", "hmmstrata/probes.py", "hmmstrata/series.py", "hmmstrata/localdim.py",
-           "hmmstrata/split.py", "hmmstrata/calibrate.py", "hmmstrata/process/__init__.py", "hmmstrata/process/base.py",
-           "hmmstrata/process/registry.py", "hmmstrata/process/sync_strata.py",
-           "tests/test_process.py", "tests/test_inherit.py"]
-FILES = {m: (ROOT / m).read_text() for m in MODULES}
+TAG = "v0.1.0"
+REPO = "https://github.com/kubasiemion/hmm-strata"
 
 # ---------------------------------------------------------------- numbers for the text
 fin = R["final"]
-def f3(v): return f"{v:.3f}"
-rows = "\n".join(
-    f"| {s[-1]} | {1e3*fin[s]['excess_kl_nats']:.3f} | {fin[s]['probe_r2_all']:.4f} | {fin[s]['point_ratio_perpos_6_14']:.3f} |"
-    for s in sorted(fin))
-
 pr = [fin[s]["point_ratio_perpos_6_14"] for s in fin]
 kl_ = [1e3 * fin[s]["excess_kl_nats"] for s in fin]
 r2_ = [fin[s]["probe_r2_all"] for s in fin]
+rows = "\n".join(
+    f"| {s[-1]} | {1e3*fin[s]['excess_kl_nats']:.3f} | {fin[s]['probe_r2_all']:.4f} | {fin[s]['point_ratio_perpos_6_14']:.3f} |"
+    for s in sorted(fin))
 
 
 def first(o, key, cond):
@@ -39,16 +35,30 @@ def order_row(name):
             first(o, "kl_e3", lambda v: v < 1), first(o, "hist_k2", lambda v: (v - h0) / (h1 - h0) >= 0.9))
 
 
-order_lines = "\n".join(f"| {n} | " + " | ".join(str(x) for x in order_row(n)) + " |"
-                        for n in ["dest0", "dest1", "dest2", "control0", "control1", "control2", "control3", "control4"])
+def tprog(o, key, frac, transform=lambda r, k: r[k]):
+    steps = [r["step"] for r in o]
+    v = np.log(np.array([transform(r, key) for r in o], float))
+    p = (v[0] - v) / (v[0] - v[-1])
+    return steps[int(np.argmax(p >= frac))]
+
+
+NAMES = ["dest0", "dest1", "dest2", "control0", "control1", "control2", "control3", "control4"]
+order_lines = "\n".join(f"| {n} | " + " | ".join(str(x) for x in order_row(n)) + " |" for n in NAMES)
+log_lines = "\n".join(
+    f"| {n} | {tprog(R['series'][n], 'kl_e3', .5)} / {tprog(R['series'][n], 'kl_e3', .9)} | "
+    f"{tprog(R['series'][n], 'belief_r2', .5, lambda r, k: 1 - r[k])} / {tprog(R['series'][n], 'belief_r2', .9, lambda r, k: 1 - r[k])} |"
+    for n in NAMES)
 inh_lines = "\n".join(
     f"| {s[-1]} | " + " | ".join(f"{v[0]-v[1]:+.2f}" for k, v in sorted(R['inherit_final'][s].items(), key=lambda kv: int(kv[0]))) + " |"
     for s in sorted(R["inherit_final"]))
+abl_lines = "\n".join(
+    f"| {s[-1]} | {st} | {r['dim']} | {r['base']['all']:.3f} | {r['hist']['all']:.3f} | {r['random_mean']['all']:.3f} | "
+    f"{r['belief']['all']:.3f} | {r['dec_before']:.2f} to {r['dec_after']:.2f} |"
+    for s in sorted(R["ablation"]) for st, r in sorted(R["ablation"][s].items()))
 
 cells = []
 md = lambda s: cells.append(nbf.v4.new_markdown_cell(s.strip("\n")))
-code = lambda s, hidden=False: cells.append(
-    nbf.v4.new_code_cell(s.strip("\n"), metadata=({"cellView": "form"} if hidden else {})))
+code = lambda s: cells.append(nbf.v4.new_code_cell(s.strip("\n")))
 
 md(f"""
 # Synchronizing strata
@@ -57,7 +67,8 @@ md(f"""
 represent, how that is learned, and which measurements of it can be trusted.*
 
 This notebook reproduces and checks an earlier write-up of the same setup. It is a baseline: the hidden process
-is a plug-in, so the interesting use is to change it and rerun (last sections).
+is a plug-in, so the interesting use is to change it and rerun (section 9). The code is the
+[hmm-strata]({REPO}) package, cloned at tag `{TAG}`.
 
 **What is in it**
 
@@ -65,43 +76,41 @@ is a plug-in, so the interesting use is to change it and rerun (last sections).
    (beliefs collapse onto a segment) and four full-rank "fold" tokens.
 2. A 143,846-parameter transformer (4 layers, d=64, one 8-dim head per layer) trained on fresh samples.
 3. Exact tools: the Bayes belief, the optimal next-token distribution, KL to it, all computed analytically.
-4. Measurements: excess KL, a linear belief probe, spread of the point stratum, a history probe,
-   learning order across checkpoints, and error inheritance.
+4. Measurements: excess KL, a linear belief probe, spread of the point stratum, a history probe, learning order
+   across checkpoints, error inheritance, and an ablation of the history directions.
 5. What did **not** work (a local-dimension estimator), with the calibration that shows why.
 
-**Headline results** (3 seeds, 40k steps; the notebook regenerates a fast single-seed version in minutes)
+**Headline results** (3 seeds of the setup of this notebook, 40k steps; it regenerates a fast single-seed version in minutes)
 
 * The model reaches the Bayes-optimal predictor to within about {max(kl_):.2f} x 10^-3 nats per token, and its final
   residual stream linearly encodes the belief state (R² > {min(r2_)-0.0005:.3f}).
 * After the rank-1 word the activations are much tighter than after a fold token (variance ratio {min(pr):.2f} to {max(pr):.2f}),
   but they are not a point: the residual stream keeps pre-sync history, decodable for a few steps.
-* The coarse next-token surface is learned before the belief geometry; the last order of magnitude of KL arrives
-  after the belief probe has saturated, together with the surplus history.
+* **Learning order depends on the scale it is measured on.** On linear scales the coarse next-token surface is
+  learned before the belief probe saturates, but the probe's R² starts at 0.81, which makes it a poor clock. On a
+  log scale, KL and belief-probe error improve together. The surplus history appears later (around step 10,000
+  on all three seeds).
+* Removing the linear directions that decode the surplus history hurts no more than removing matched control
+  directions, but the removal is incomplete, so this does not show the history is unused.
 * Error inheritance (does the model build belief t+1 from its belief at t?) is large at initialisation and mostly
   gone, but not entirely, by the end.
 
-**Caveats** are in the last section. In particular: one HMM, one architecture, three seeds, and all thresholds
-in the learning-order analysis are choices.
+**Caveats** are in the last section: one HMM, one architecture, three seeds, and all thresholds are choices.
 """)
 
 md("""
 ## 0. Setup
 
-The package is written by the next cell (collapsed: it is plain Python, about 800 lines). Set `MODE` below.
-`fast` trains one seed for 5,000 steps (a few minutes on a Colab GPU); `full` trains three seeds for 40,000
-steps (tens of minutes on a GPU, far too slow on CPU). A GPU runtime is recommended. The stored outputs were
-produced in fast mode on an Intel Arc GPU (device `xpu`); on Colab the device is `cuda`.
+The package is cloned from GitHub at a fixed tag, so what you read in the repository is what runs here.
+Set `MODE` below. `fast` trains one seed for 5,000 steps (a few minutes on a Colab GPU); `full` trains three
+seeds for 40,000 steps (tens of minutes on a GPU, far too slow on CPU). A GPU runtime is recommended. The stored
+outputs were produced in fast mode on an Intel Arc GPU (device `xpu`); on Colab the device is `cuda`.
 """)
 
-code("#@title Package code (click to expand)\n"
-     "import os, sys, pathlib\n"
-     f"FILES = {FILES!r}\n"
-     "for path, text in FILES.items():\n"
-     "    p = pathlib.Path('hmmstrata_pkg') / path\n"
-     "    p.parent.mkdir(parents=True, exist_ok=True)\n"
-     "    p.write_text(text)\n"
-     "sys.path.insert(0, str(pathlib.Path('hmmstrata_pkg').resolve()))\n"
-     "print(len(FILES), 'files written')", hidden=True)
+code(f"""
+![ -d hmm-strata ] || git clone -q --branch {TAG} --depth 1 {REPO}
+import sys; sys.path.insert(0, "hmm-strata")
+""")
 
 code("""
 MODE = "fast"  #@param ["fast", "full"]
@@ -116,12 +125,9 @@ from hmmstrata import exact
 
 DEV = pick()
 STEPS, SEEDS = (5000, [0]) if MODE == "fast" else (40000, [0, 1, 2])
+RESULTS = json.load(open("hmm-strata/notebooks/results.json"))   # shipped results (3 + 5 seeds, computed offline)
 print("device:", DEV, "| mode:", MODE, "| steps:", STEPS, "| seeds:", SEEDS)
 """)
-
-code("#@title Results shipped with the notebook (computed offline on 3 + 5 seeds)\n"
-     f"RESULTS = json.loads({json.dumps(json.dumps(R))})\n"
-     "print(list(RESULTS))", hidden=True)
 
 md("""
 ## 1. The process
@@ -158,13 +164,14 @@ md("""
 ## 2. Unit tests of the exact tools
 
 Sampling frequencies match the analytic predictions, the Bayes predictor's cross-entropy equals its own
-entropy, the belief after `s` is a single point, and the error-inheritance Jacobian matches a finite
-difference and separates a synthetic recursive estimator from a parallel one.
+entropy, the belief after `s` is a single point, the error-inheritance Jacobian matches a finite difference
+and separates a synthetic recursive estimator from a parallel one, and the ablation helper is the identity
+when nothing is ablated.
 """)
 
 code("""
 import unittest
-suite = unittest.defaultTestLoader.discover("hmmstrata_pkg/tests", pattern="test_*.py")
+suite = unittest.defaultTestLoader.discover("hmm-strata/tests", pattern="test_*.py")
 result = unittest.TextTestRunner(verbosity=1).run(suite)
 assert result.wasSuccessful()
 """)
@@ -225,8 +232,9 @@ md("""
 ### Surplus history
 
 The belief after `s` is a single point, so the token *before* the `s` carries no information about the future:
-any decoding of it above the majority baseline is history the model keeps but does not need. The probe decodes
-that token from the residual stream `k` steps after the `s`, at the final layer and at each layer for `k = 2`.
+any decoding of it above the majority baseline is history the model keeps but the Bayes predictor does not need.
+The probe decodes that token from the residual stream `k` steps after the `s`, at the final layer and at each
+layer for `k = 2`.
 """)
 
 code("""
@@ -244,18 +252,34 @@ md(f"""
 ## 5. Learning order across training
 
 For every checkpoint we measure KL, the belief-probe R² and the history decodable at `k = 2`. The answer to
-"what is learned first" depends on the threshold, so the table gives the first checkpoint reaching fixed levels
-(the grid is log-spaced and coarse):
+"what is learned first" depends on the scale used to measure progress, so both readings are shown.
+
+**Linear thresholds.** First checkpoint reaching fixed levels (the grid is log-spaced and coarse):
 
 | run | KL < 5e-3 | R² > 0.99 | KL < 1e-3 | history k=2 at 90% of its gain |
 |---|---|---|---|---|
 {order_lines}
 
+On this reading the coarse surface (KL within 5e-3) comes before the belief probe saturates, and the last order
+of magnitude of KL arrives after it, together with the surplus history.
+
+**Log scale.** The step at which log(error) has covered 50% / 90% of its total drop, for KL and for the belief-probe
+error `1 - R²`:
+
+| run | KL (50% / 90%) | belief-probe error (50% / 90%) |
+|---|---|---|
+{log_lines}
+
+The R² starts at 0.81, so it has little room to move and is a poor clock on a linear scale. On a log scale the two
+track each other: half of the drop in both happens around step 400 to 1,000, and the probe error is done earlier
+than KL (KL keeps improving to the end of training, as the learning rate decays). So "the surface is learned
+before the geometry" holds only for linear thresholds, and should not be read as a general ordering. Measured
+instead as "90% of the total KL improvement on a linear scale", KL looks finished by step 16 to 40, an artefact of
+its large starting value.
+
 `dest*` are the destination-emission runs of this notebook, `control*` an earlier variant (source-state emission,
-weight decay 0.01). Reading: the coarse surface comes first; the last order of magnitude of KL arrives after the
-belief probe has saturated and together with the surplus history. Measured instead as "90% of the total KL
-improvement on a linear scale", KL looks finished by step 16 to 40, which is an artefact of its huge starting
-value and should not be quoted as "the surface settles first".
+weight decay 0.01). The three `dest` seeds agree on the history timing (step 10,041 on all three) and on a
+decreasing history at k = 4; the earlier variant does not agree on the latter.
 """)
 
 code("""
@@ -264,10 +288,11 @@ for name, o in RESULTS["series"].items():
     st = np.array([r["step"] for r in o]) + 1
     col = "C0" if name.startswith("dest") else "C1"
     ax[0].plot(st, [r["kl_e3"] for r in o], c=col, alpha=.7)
-    ax[1].plot(st, [r["belief_r2"] for r in o], c=col, alpha=.7)
+    ax[1].plot(st, [1 - r["belief_r2"] for r in o], c=col, alpha=.7)
     ax[2].plot(st, [r["hist_k2"] for r in o], c=col, alpha=.7)
 ax[0].set_yscale("log"); ax[0].set_title("KL to Bayes (1e-3 nats)")
-ax[1].set_title("belief-probe R2"); ax[2].set_title("pre-sync token decodable, k=2")
+ax[1].set_yscale("log"); ax[1].set_title("belief-probe error, 1 - R2")
+ax[2].set_title("pre-sync token decodable, k=2")
 for a in ax: a.set_xscale("log"); a.set_xlabel("training step")
 plt.tight_layout(); plt.show()
 print("blue: destination-emission seeds (this notebook's setup), orange: earlier variant")
@@ -321,8 +346,49 @@ for seed, run in RUNS.items():
     print(f"seed {seed}: real - shuffled by depth:", {k: round(v[0] - v[1], 3) for k, v in r.items()})
 """)
 
+md(f"""
+## 7. Is the surplus history load-bearing?
+
+The last order of magnitude of KL arrives together with the surplus history, which suggests the history may not
+be surplus to the *model*: a finite network cannot hold the exact belief, so it might refine it with raw recent
+history. A direct test: take the 15 linear directions that decode the pre-sync token (at 1, 2 and 3 steps after
+`s`), make them orthogonal to the belief subspace, and mean-ablate them at one residual stream. If the history
+carries the fine surface, KL should rise sharply.
+
+Two controls are needed. The history directions turn out to have low variance (1 to 6% of the total), so a naive
+random subspace is not a fair control: it removes high-variance directions and raises KL by a factor of 50 or
+more, which says nothing about history. The control used is a decoder with the same regression form fitted to
+*shuffled* labels (same low-variance profile, no history information). The belief-probe subspace is ablated as a
+reference.
+
+Overall KL after ablation (10^-3 nats), shipped results, destination-emission seeds, final checkpoints:
+
+| seed | stream | dim | baseline | history removed | shuffled control | belief removed | k=2 decodable (refit) |
+|---|---|---|---|---|---|---|---|
+{abl_lines}
+
+(stream = which residual the ablation is applied to: 2 and 3 are after those blocks, 4 is the final residual.)
+
+* KL rises by a factor of 1.2 to 2.5, never anywhere near the 5 x 10^-3 level, and the shuffled control raises it
+  by about as much. The history ablation clearly exceeds its control in only two of nine cases.
+* So removing the main linear history directions does not specifically hurt. **This is weak evidence**, because
+  the removal is incomplete: a refit decoder still reads the pre-sync token at 0.5 to 0.7 afterwards, so the
+  history is also stored in directions the linear decoders did not find. A stronger test would remove them
+  iteratively until the decodability is at chance.
+""")
+
+code("""
+# Live version on the model(s) trained above (stream 3 only, a minute or so). Fast-mode models are not converged.
+from hmmstrata.ablate import run as run_ablation
+for seed, run in RUNS.items():
+    for stream, r in run_ablation(run, streams=(3,), n=15000, n_random=2, dev=DEV).items():
+        print(f"seed {seed}, stream {stream}, {r['dim']} history directions; k=2 decodable {r['dec_before']:.2f} -> {r['dec_after']:.2f}")
+        print("  overall KL (1e-3):", {k: round(r[k]['all'], 3) for k in ('base', 'hist', 'random_mean', 'belief')},
+              "(base / history removed / shuffled control / belief removed)")
+""")
+
 md("""
-## 7. What did not work: local dimension of the residual stream
+## 8. What did not work: local dimension of the residual stream
 
 The natural way to look for "strata" in activations is a local-dimension estimator. We tried TwoNN and a
 correlation-dimension slope on the residual stream. They did **not** discriminate the strata. The calibration
@@ -338,7 +404,7 @@ synthetic()
 """)
 
 md("""
-## 8. Make the hidden state your own
+## 9. Make the hidden state your own
 
 A process is a token-labelled HMM: `T[x, i, j]` with `sum_x T[x]` row-stochastic, plus optional annotations
 (named state groups, token and state events, an `expected` dictionary for predictions written down before
@@ -375,16 +441,18 @@ h2 = make("sync_strata_asym")
 print("ranks:", {k: int(v) for k, v in zip(h2.token_names, h2.token_ranks())})
 print("stationary distribution:", h2.stationary().round(3), "(every state should keep non-trivial mass)")
 # To train and analyse it:  train("sync_strata_asym", {}, seed, STEPS, Path("runs/asym"), DEV, wd=0.0)
-# (hmmstrata.analyze looks up token names 's' and 'f', so it works for any process that keeps them.)
+# (hmmstrata.analyze looks up the token names 's' and 'f', so it works for any process that keeps them.)
 """)
 
 md(f"""
-## 9. Limits
+## 10. Limits
 
 * One HMM, one architecture and context length, three seeds in the shipped results. Seeds disagree noticeably
   on the point ratio ({min(pr):.2f} to {max(pr):.2f}) and on how much history is retained.
 * Probe-based measurements are only as good as the linear probe; the error-inheritance score goes through one.
-* Every threshold in the learning-order table is a choice. The checkpoint grid is coarse.
+* Every threshold in the learning-order tables is a choice, and the checkpoint grid is coarse. The ordering of
+  KL against probe error changes with the scale (linear against log).
+* The history ablation removes only linear directions and the removal is incomplete.
 * The point-stratum variance ratio measures spread, not dimension.
 * The earlier variant (source-state emission) and this one differ, so numbers from the two must not be mixed.
 
@@ -400,8 +468,9 @@ md(f"""
   Learning for LLM Reasoning.* https://arxiv.org/abs/2506.01939
 
 The setup follows an earlier private write-up produced with a Claude model; the destination-emission HMM, the
-point-ratio definition and the surplus-history idea come from it. The checks here (position-15 artefact in the
-original analysis, emission convention, learning order, inheritance, the failed dimension estimators) are ours.
+point-ratio definition and the surplus-history idea come from it. The checks here (the position-15 artefact in the
+original analysis, emission convention, learning order, inheritance, the history ablation, the failed dimension
+estimators) are ours.
 """)
 
 nb = nbf.v4.new_notebook(cells=cells, metadata={

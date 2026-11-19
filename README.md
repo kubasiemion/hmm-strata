@@ -5,7 +5,7 @@ words**: what its activations represent, how that is learned, and which measurem
 
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kubasiemion/hmm-strata/blob/main/notebooks/hmm_strata_baseline.ipynb)
 
-The notebook is the quickest way in: it writes the package, trains a model (about 2 minutes in fast mode on a GPU),
+The notebook is the quickest way in: it clones this repository (pinned to a tag), trains a model (about 2 minutes in fast mode on a GPU),
 and reproduces every number below. The hidden process is a plug-in, so the intended use is to change it and rerun.
 
 ## The setup
@@ -31,22 +31,37 @@ These reproduce the numbers of an earlier private write-up of the same setup (po
 0.08×10⁻³) once its analysis is corrected for an untrained position. Emitting fold tokens from the *source* state
 instead of the destination state gives a visibly different result (point ratio 0.09 to 0.20).
 
-**Learning order** (log-spaced checkpoints, 8 runs; the grid is coarse and every threshold is a choice):
+**Learning order** (log-spaced checkpoints; the three destination-emission seeds are the reference, five seeds of an
+earlier variant are shipped for comparison). The answer depends on the scale used to measure progress:
 
-| Event | First checkpoint reaching it |
+| Event (linear thresholds) | First checkpoint reaching it |
 |---|---|
 | KL < 5×10⁻³ nats (coarse surface) | step 400 – 1,600 |
 | Belief-probe R² > 0.99 | step 4,000 (every run) |
 | KL < 1×10⁻³ nats (fine surface) | step 10,000 – 16,000 |
-| Surplus pre-sync history decodable at k = 2, 90% of its gain | step 4,000 – 25,000 |
+| Surplus pre-sync history decodable at k = 2, 90% of its gain | step 10,041 (all three destination-emission seeds) |
 
-The coarse next-token surface is learned before the belief geometry; the last order of magnitude of KL arrives after
-the belief probe has saturated, together with the surplus history. Measured as "90% of the total KL improvement on
-a linear scale", KL looks finished by step 16–40, which is an artefact of its large starting value.
+On a linear reading the coarse surface comes before the belief probe saturates. But the probe's R² starts at 0.81,
+which makes it a poor clock. On a **log scale** the two track each other: half of the log drop of both KL and the
+probe error `1 − R²` happens around step 400 to 1,000, and the probe error is done earlier (steps 16,000 to 25,000)
+than KL, which keeps improving to the end of training. So "the surface is learned before the geometry" depends on
+the scale and should not be read as a general ordering. Measured as "90% of the total KL improvement on a linear
+scale", KL looks finished by step 16–40, an artefact of its large starting value.
 
 **Surplus history.** After `s` the true belief is a single point, so the token before `s` carries no information about
 the future. It is nevertheless decodable from the residual stream: about 0.9 one step after `s`, falling to chance by
 about 8 steps (majority baseline 0.23).
+
+**Is the surplus history load-bearing?** (`hmmstrata/ablate.py`) The last order of magnitude of KL arrives together
+with the surplus history, so the history might be surplus only to the Bayes predictor and not to the model. Test: mean-ablate
+the 15 linear directions that decode the pre-sync token (orthogonalised against the belief subspace) at one residual
+stream, and compare KL with a control that uses decoders fitted to shuffled labels (same low-variance profile, no
+history information). A naive random subspace is not a fair control here: it hits high-variance directions and raises
+KL fifty-fold. On the three destination-emission seeds KL rises by a factor of 1.2 to 2.5 (control: 1.3 to 1.9), never
+near 5×10⁻³, and the history ablation exceeds the control clearly in only 2 of 9 cases. The removal is incomplete
+(a refit decoder still reads the token at 0.51–0.73 afterwards), so this is weak evidence that the linear history
+directions are not specifically necessary, and does not show the history is unused. Iterative nullspace removal would be
+the stronger test.
 
 **Error inheritance** (does the model build its belief at t+1 from its belief at t?). Real minus shuffled-pair
 correlation of probe error at t+1 with probe error at t pushed through the true update. About +0.4 to +0.5 at
@@ -65,6 +80,7 @@ hmmstrata/
   exact.py       sampling, beliefs, Bayes predictor, KL, distance to events
   model.py       train.py      small GPT and training with log-spaced checkpoints
   analyze.py     final-checkpoint metrics (KL, belief probe, point ratio)
+  ablate.py      ablation of the history directions, with matched controls
   probes.py      belief and pre-sync-history probes across layers
   series.py      metrics across checkpoints
   inherit.py     error inheritance
@@ -75,7 +91,7 @@ notebooks/       hmm_strata_baseline.ipynb (executed), build_notebook.py, result
 
 Run locally: `python -m hmmstrata.train --process sync_strata --pparams '{"dest_emission": true}' --wd 0 --seed 0 --steps 40000 --device cuda --out runs/s0`,
 then `python -m hmmstrata.analyze runs/s0`. The notebook is rebuilt with `python notebooks/build_notebook.py`
-(`precompute.py` needs the local `runs/` directory and is kept as a record of how `results.json` was produced).
+(`precompute.py` and `add_ablation.py` need the local `runs/` directory and are kept as a record of how `results.json` was produced).
 
 ## Adding a process
 
