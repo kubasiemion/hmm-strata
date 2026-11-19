@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+runs/
+notebooks/precompute.log
+.ipynb_checkpoints/
+NOTES.md
+NOTES-design.md
